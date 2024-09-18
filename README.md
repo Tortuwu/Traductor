@@ -7,3 +7,8 @@ Se usa la libreria "googletrans" para la traducción del texto transcrito en jap
 - Se implementaron funciones para cada paso (Transcripción y Traducción)
 - Se implementó una función para seleccionar las rutas para seleecionar los archivos
 - Se automatizó el proceso junto con prints que indican el progreso
+
+## Requisitos
+- googletrans 4.0.0
+- speech_recognition 3.8.1
+- tkinter 

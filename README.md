@@ -4,4 +4,6 @@ Se usa la libreria "speech_recognition" para la transcripción del audio en japo
 Se usa la libreria "googletrans" para la traducción del texto transcrito en japonés a inglés.
 
 ## Cambios
-- Se intenta implementar una función para que determine mediante una ventana flotante el PATH del audio y archivos resultantes
+- Se implementaron funciones para cada paso (Transcripción y Traducción)
+- Se implementó una función para seleccionar las rutas para seleecionar los archivos
+- Se automatizó el proceso junto con prints que indican el progreso

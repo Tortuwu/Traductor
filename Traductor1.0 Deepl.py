@@ -1,7 +1,7 @@
 #importamos sys pal try
 import sys, subprocess
 
-# Funcion pa intalar las librerias
+# Funcion pa instalar las librerias
 def install_libraries():
     for lib in ["SpeechRecognition", "tkinter", "deepl"]:
         try:

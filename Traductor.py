@@ -1,3 +1,17 @@
+# Importamos sys pal try
+import sys, subprocess
+
+# Funcion pa instalar las librerias
+def install_libraries():
+    for lib in ["SpeechRecognition", "googletrans==4.0.0-rc1", "tkinter"]:
+        try:
+            __import__(lib.split("==")[0])
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", lib])
+
+# Intentamos instalar las librerias si se necesita
+install_libraries()
+
 ## Librerias para reconocer la voz
 import speech_recognition as sr
 # Librerias para traducir

@@ -1,0 +1,130 @@
+import queue
+import time
+import numpy as np
+import sounddevice as sd
+import samplerate
+from faster_whisper import WhisperModel
+import argostranslate.package
+import argostranslate.translate
+
+# =====================
+# CONFIG
+# =====================
+
+INPUT_SAMPLE_RATE = 48000
+TARGET_SAMPLE_RATE = 16000
+CHUNK_SECONDS = 1
+
+CHUNK_SAMPLES = int(INPUT_SAMPLE_RATE * CHUNK_SECONDS)
+SOURCE_LANG = "ja"
+
+DEVICE_INDEX = 12   # Stereo Mix (MONO)
+VOICE_THRESHOLD = 0.008
+
+# =====================
+# TRANSLATOR
+# =====================
+
+class LocalTranslator:
+    def __init__(self, src="ja", dst="en"):
+        installed = argostranslate.package.get_installed_packages()
+        if not any(p.from_code == src and p.to_code == dst for p in installed):
+            argostranslate.package.update_package_index()
+            pkg = next(
+                p for p in argostranslate.package.get_available_packages()
+                if p.from_code == src and p.to_code == dst
+            )
+            argostranslate.package.install_from_path(pkg.download())
+
+        self.src = src
+        self.dst = dst
+
+    def traducir(self, text):
+        return argostranslate.translate.translate(text, self.src, self.dst)
+
+# =====================
+# INIT
+# =====================
+
+print("Montando Whisper")
+
+whisper_model = WhisperModel(
+    "small",
+    device="cpu",
+    compute_type="int8"
+)
+
+translator = LocalTranslator()
+
+audio_queue = queue.Queue()
+resampler = samplerate.Resampler("sinc_fastest", channels=1)
+
+# =====================
+# AUDIO CALLBACK
+# =====================
+
+def audio_callback(indata, frames, time_info, status):
+    if status:
+        print("Audio status:", status)
+
+    # indata shape: (frames, 1)
+    audio_queue.put(indata[:, 0].copy())
+
+# =====================
+# LOOP
+# =====================
+
+print(sd.query_devices())
+
+
+print("Escuchando audio del sistema")
+
+try:
+    with sd.InputStream(
+        samplerate=INPUT_SAMPLE_RATE,
+        device=DEVICE_INDEX,
+        channels=1,
+        dtype="float32",
+        callback=audio_callback
+    ):
+        buffer = np.zeros(0, dtype=np.float32)
+
+        while True:
+            while not audio_queue.empty():
+                buffer = np.concatenate((buffer, audio_queue.get()))
+
+            if len(buffer) >= CHUNK_SAMPLES:
+                chunk = buffer[:CHUNK_SAMPLES]
+                buffer = buffer[CHUNK_SAMPLES:]
+
+                # energía RMS
+                rms = np.sqrt(np.mean(chunk ** 2))
+                if rms < VOICE_THRESHOLD:
+                    continue
+
+                # resample
+                chunk_16k = resampler.process(
+                    chunk,
+                    TARGET_SAMPLE_RATE / INPUT_SAMPLE_RATE
+                )
+
+                chunk_16k = np.clip(chunk_16k, -1.0, 1.0)
+
+                segments, _ = whisper_model.transcribe(
+                    chunk_16k,
+                    language=SOURCE_LANG,
+                    vad_filter=False
+                )
+
+                text = " ".join(seg.text.strip() for seg in segments).strip()
+
+                if text:
+                    print("JP", text)
+                    print("EN", translator.traducir(text))
+
+            time.sleep(0.01)
+
+except KeyboardInterrupt:
+    print("Saliendo")
+except Exception as e:
+    print("Error:", e)

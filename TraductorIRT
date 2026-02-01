@@ -1,130 +1,186 @@
 import queue
-import time
-import numpy as np
+import json
 import sounddevice as sd
+import numpy as np
 import samplerate
-from faster_whisper import WhisperModel
+import os
+import sys
+import threading
+import time
+from vosk import Model, KaldiRecognizer
+
+# Motores
+from deep_translator import GoogleTranslator
 import argostranslate.package
 import argostranslate.translate
 
 # =====================
-# CONFIG
+# CONFIGURACIÓN
 # =====================
-
 INPUT_SAMPLE_RATE = 48000
 TARGET_SAMPLE_RATE = 16000
-CHUNK_SECONDS = 1
+DEVICE_INDEX = 14
+GAIN = 6.0
 
-CHUNK_SAMPLES = int(INPUT_SAMPLE_RATE * CHUNK_SECONDS)
-SOURCE_LANG = "ja"
+# Tiempo (segundos) que castigamos a Google si falla una vez
+GOOGLE_COOLDOWN_TIME = 60 
 
-DEVICE_INDEX = 12   # Stereo Mix (MONO)
-VOICE_THRESHOLD = 0.008
+MODEL_PATH = r"C:/Users/Mcuin/OneDrive/Escritorio/idk/vosk-model-ja-0.22"
+
+DICCIONARIO_STREAM = {
+    "エペ": "Apex",
+    "ヴァロ": "Valorant",
+    "草": "LOL",
+    "こんちゃ": "Hello",
+    "おつ": "GG",
+    "配信": "Stream",
+    "初見": "New viewer",
+    "えーと": "Umm",
+    "あの": "Uh"
+}
 
 # =====================
-# TRANSLATOR
+# CLASE: WORKER HÍBRIDO INTELIGENTE
 # =====================
-
-class LocalTranslator:
-    def __init__(self, src="ja", dst="en"):
-        installed = argostranslate.package.get_installed_packages()
-        if not any(p.from_code == src and p.to_code == dst for p in installed):
+class SmartHybridWorker(threading.Thread):
+    def __init__(self):
+        super().__init__()
+        self.q = queue.Queue(maxsize=10)
+        self.running = True
+        self.daemon = True
+        
+        # Estado del Cooldown
+        self.next_google_try = 0 # Timestamp de cuándo podemos volver a usar Google
+        
+        # 1. Google
+        print("☁️ [Worker] Google Translate listo.")
+        self.google = GoogleTranslator(source='ja', target='en')
+        
+        # 2. Argos (Offline)
+        print("🛡️ [Worker] Verificando respaldo Offline...")
+        self.argos_ready = False
+        try:
             argostranslate.package.update_package_index()
-            pkg = next(
-                p for p in argostranslate.package.get_available_packages()
-                if p.from_code == src and p.to_code == dst
-            )
-            argostranslate.package.install_from_path(pkg.download())
+            installed = argostranslate.package.get_installed_packages()
+            from_code, to_code = "ja", "en"
+            
+            if not any(p.from_code == from_code and p.to_code == to_code for p in installed):
+                print(f"⬇️ Descargando modelo de respaldo...")
+                pkgs = argostranslate.package.get_available_packages()
+                pkg = next(p for p in pkgs if p.from_code == from_code and p.to_code == to_code)
+                argostranslate.package.install_from_path(pkg.download())
+            
+            self.argos_source = from_code
+            self.argos_target = to_code
+            self.argos_ready = True
+            print("✅ [Worker] Sistema Híbrido Blindado Activo.")
+            
+        except Exception as e:
+            print(f"⚠️ Error Offline: {e}")
 
-        self.src = src
-        self.dst = dst
+    def add_text(self, text):
+        if self.q.full():
+            try: self.q.get_nowait()
+            except: pass
+        self.q.put(text)
 
-    def traducir(self, text):
-        return argostranslate.translate.translate(text, self.src, self.dst)
+    def pre_procesar(self, texto):
+        for jp_word, en_word in DICCIONARIO_STREAM.items():
+            texto = texto.replace(jp_word, en_word)
+        return texto
+
+    def traducir_offline(self, text):
+        """Función auxiliar para usar Argos directamente"""
+        if self.argos_ready:
+            try:
+                return argostranslate.translate.translate(text, self.argos_source, self.argos_target), "🔵"
+            except:
+                return "Error Offline", "❌"
+        return "Sin conexión", "❌"
+
+    def run(self):
+        while self.running:
+            try:
+                raw_text = self.q.get(timeout=0.5)
+                clean_text = self.pre_procesar(raw_text)
+                
+                translated = ""
+                tag = ""
+                current_time = time.time()
+
+                # --- LÓGICA DE DECISIÓN INTELIGENTE ---
+                
+                # CASO A: Google está castigado (Cooldown activo)
+                if current_time < self.next_google_try:
+                    # Usamos Offline DIRECTAMENTE (Ahorra tiempo de timeout)
+                    translated, tag = self.traducir_offline(clean_text)
+                
+                # CASO B: Google está disponible
+                else:
+                    try:
+                        translated = self.google.translate(clean_text)
+                        tag = "🟢"
+                        time.sleep(0.1) # Cortesía con la API
+                    except Exception as e:
+                        # ¡Fallo! Castigamos a Google por 60 segundos
+                        print(f"⚠️ Google falló ({e}). Cambiando a modo Offline por {GOOGLE_COOLDOWN_TIME}s.")
+                        self.next_google_try = current_time + GOOGLE_COOLDOWN_TIME
+                        
+                        # Usamos el respaldo inmediatamente para esta frase
+                        translated, tag = self.traducir_offline(clean_text)
+
+                # Salida
+                if translated:
+                    print(f"🇯🇵 {clean_text}")
+                    print(f"{tag} {translated}")
+                    print("-" * 25)
+
+                self.q.task_done()
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error Worker: {e}")
 
 # =====================
-# INIT
+# INICIALIZACIÓN
 # =====================
 
-print("Montando Whisper")
+worker = SmartHybridWorker()
+worker.start()
 
-whisper_model = WhisperModel(
-    "small",
-    device="cpu",
-    compute_type="int8"
-)
+if not os.path.exists(MODEL_PATH):
+    sys.exit("❌ Error Vosk")
 
-translator = LocalTranslator()
+print("🛠️ Cargando Vosk...")
+model = Model(MODEL_PATH)
+recognizer = KaldiRecognizer(model, TARGET_SAMPLE_RATE)
+recognizer.SetWords(False)
 
 audio_queue = queue.Queue()
 resampler = samplerate.Resampler("sinc_fastest", channels=1)
 
-# =====================
-# AUDIO CALLBACK
-# =====================
-
 def audio_callback(indata, frames, time_info, status):
-    if status:
-        print("Audio status:", status)
+    if status: pass
+    mono = np.mean(indata, axis=1)
+    audio_queue.put(mono.copy())
 
-    # indata shape: (frames, 1)
-    audio_queue.put(indata[:, 0].copy())
-
-# =====================
-# LOOP
-# =====================
-
-print(sd.query_devices())
-
-
-print("Escuchando audio del sistema")
+print(f"🎧 Escuchando... (Modo Smart Failover)")
 
 try:
-    with sd.InputStream(
-        samplerate=INPUT_SAMPLE_RATE,
-        device=DEVICE_INDEX,
-        channels=1,
-        dtype="float32",
-        callback=audio_callback
-    ):
-        buffer = np.zeros(0, dtype=np.float32)
-
+    with sd.InputStream(samplerate=INPUT_SAMPLE_RATE, device=DEVICE_INDEX, channels=2, dtype="float32", blocksize=8000, callback=audio_callback):
         while True:
-            while not audio_queue.empty():
-                buffer = np.concatenate((buffer, audio_queue.get()))
+            chunk = audio_queue.get()
+            chunk_16k = resampler.process(chunk, TARGET_SAMPLE_RATE / INPUT_SAMPLE_RATE)
+            chunk_16k = np.clip(chunk_16k * GAIN, -1.0, 1.0)
+            pcm16 = (chunk_16k * 32767).astype(np.int16).tobytes()
 
-            if len(buffer) >= CHUNK_SAMPLES:
-                chunk = buffer[:CHUNK_SAMPLES]
-                buffer = buffer[CHUNK_SAMPLES:]
-
-                # energía RMS
-                rms = np.sqrt(np.mean(chunk ** 2))
-                if rms < VOICE_THRESHOLD:
-                    continue
-
-                # resample
-                chunk_16k = resampler.process(
-                    chunk,
-                    TARGET_SAMPLE_RATE / INPUT_SAMPLE_RATE
-                )
-
-                chunk_16k = np.clip(chunk_16k, -1.0, 1.0)
-
-                segments, _ = whisper_model.transcribe(
-                    chunk_16k,
-                    language=SOURCE_LANG,
-                    vad_filter=False
-                )
-
-                text = " ".join(seg.text.strip() for seg in segments).strip()
-
-                if text:
-                    print("JP", text)
-                    print("EN", translator.traducir(text))
-
-            time.sleep(0.01)
+            if recognizer.AcceptWaveform(pcm16):
+                res = json.loads(recognizer.Result())
+                txt = res.get("text", "").strip()
+                if txt and len(txt) > 1:
+                    worker.add_text(txt)
 
 except KeyboardInterrupt:
-    print("Saliendo")
-except Exception as e:
-    print("Error:", e)
+    worker.running = False
+    print("\n🛑 Fin.")

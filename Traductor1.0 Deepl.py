@@ -19,7 +19,7 @@ import deepl
 #Definimos estas variales, de idioma de destino y Api de Deepl
 
 target_lang = "EN-US"  # Definimos el idioma EN-US EN-GB
-auth_key = "1ae19495-2b6a-4827-9e32-1ae6fa98a313:fx" #Api de Deepl
+auth_key = "KEY AQUÍ" #Api de Deepl
 
 ## Definimos función para automatizar la transcripción del audio
 
